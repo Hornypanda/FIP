@@ -1,4 +1,16 @@
 {
+  "name": "fip-chatbot",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
   "devDependencies": {
     "typescript": "^5.4.0",
     "@types/react": "^18.3.0",
