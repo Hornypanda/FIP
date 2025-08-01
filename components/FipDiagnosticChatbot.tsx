@@ -6,218 +6,148 @@ import React, {
   useEffect,
 } from "react";
 import {
-  Upload,
+  Upload as UploadIcon,
   Send,
-  FileText,
   Image,
-  Heart,
-  Stethoscope,
   AlertTriangle,
   Info,
 } from "lucide-react";
 
-/*───────────────────────────────────────────────────────────────
-  helper – File → base-64 data-URL (for OpenAI vision)
-───────────────────────────────────────────────────────────────*/
+/* helper – File → base-64 data URL */
 const readAsDataURL = (file: File) =>
-  new Promise<string>((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result as string);
-    r.onerror = reject;
-    r.readAsDataURL(file);
+  new Promise<string>((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result as string);
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
   });
 
-/*───────────────────────────────────────────────────────────────
-  OpenAI call – replaces analyzeWithClaude
-───────────────────────────────────────────────────────────────*/
-async function analyzeWithOpenAI(
-  userInput: string,
-  files: File[] = []
-): Promise<string> {
-  const knowledgeBaseContext = `You are an evidence-based assistant specialised
-in diagnosing and managing Feline Infectious Peritonitis (FIP).  Rely ONLY on
-peer-reviewed sources such as ABCD guidelines and FIP Warriors® India x FSGI
-Foundation protocols.  Be clear about uncertainty and never guess.`;
-
-  const visualMessages = await Promise.all(
-    files
-      .filter((f) => f.type.startsWith("image/"))
-      .map(async (f) => ({
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: { url: await readAsDataURL(f) },
-          },
-        ],
-      }))
+/* call our serverless endpoint */
+async function askOpenAI(user: string, images: File[]) {
+  const imgMsgs = await Promise.all(
+    images.map(async (f) => ({
+      role: "user",
+      content: [
+        {
+          type: "image_url",
+          image_url: { url: await readAsDataURL(f) },
+        },
+      ],
+    }))
   );
 
-  const res = await fetch("/api/chat", {
+  const resp = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages: [
-        { role: "system", content: knowledgeBaseContext },
         {
-          role: "user",
+          role: "system",
           content:
-            userInput.trim() ||
-            "Please analyse the uploaded files using the veterinary protocol.",
+            "You are an evidence-based assistant specialising in Feline Infectious Peritonitis (FIP). " +
+            "If the user supplies images (bloodwork, X-rays, ultrasound photos) they are included *below* " +
+            "as image_url messages—describe what you see and relate it to FIP diagnostics. " +
+            "If no images are provided, work only from the text.",
         },
-        ...visualMessages,
+        { role: "user", content: user || "(See attached images)" },
+        ...imgMsgs,
       ],
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      max_tokens: 800,
     }),
-  });
+  }).then((r) => r.json());
 
-  const data = await res.json();
-  return (
-    data?.choices?.[0]?.message?.content ??
-    "I’m sorry, I didn’t receive a response."
-  );
+  return resp?.choices?.[0]?.message?.content ?? "⚠️ No response from OpenAI.";
 }
 
-/*───────────────────────────────────────────────────────────────
-  React component – full Tailwind layout
-───────────────────────────────────────────────────────────────*/
 export default function FipDiagnosticChatbot() {
   /* state */
-  const [messages, setMessages] = useState<
+  const [msgs, setMsgs] = useState<
     { role: "user" | "assistant"; content: string }[]
-  >([
-    {
-      role: "assistant",
-      content:
-        "👋 Hi! Upload bloodwork, X-rays, ultrasound images or describe symptoms and I’ll help assess FIP.",
-    },
-  ]);
-  const [inputMessage, setInputMessage] = useState<string>("");
-  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-
-  /* refs */
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  >([]);
+  const [input, setInput] = useState("");
+  const [images, setImages] = useState<File[]>([]);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  /* auto-scroll chat */
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+  /* autoscroll */
+  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [
+    msgs,
+    busy,
+  ]);
 
-  /* file picker */
-  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
+  /* pick images (only JPG / PNG) */
+  const onFiles = (e: ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
-    setUploadedFiles((prev) => [...prev, ...Array.from(e.target.files)]);
+    const valid = Array.from(e.target.files).filter((f) =>
+      /^image\/(png|jpe?g)$/i.test(f.type)
+    );
+    if (valid.length < e.target.files.length) {
+      alert("Only JPEG / PNG images are supported right now.");
+    }
+    setImages((prev) => [...prev, ...valid]);
   };
 
   /* send */
-  const handleSendMessage = async () => {
-    if (!inputMessage.trim() && uploadedFiles.length === 0) return;
-
-    // optimistic UI
-    setMessages((m) => [
+  const send = async () => {
+    if (!input.trim() && images.length === 0) return;
+    setMsgs((m) => [
       ...m,
       {
         role: "user",
         content:
-          inputMessage ||
-          `📎 Sent ${uploadedFiles.length} file${
-            uploadedFiles.length > 1 ? "s" : ""
-          } for analysis.`,
+          input ||
+          `📎 Sent ${images.length} image${images.length > 1 ? "s" : ""}.`,
       },
     ]);
-    setIsLoading(true);
-
+    setBusy(true);
     try {
-      const reply = await analyzeWithOpenAI(inputMessage, uploadedFiles);
-      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+      const reply = await askOpenAI(input, images);
+      setMsgs((m) => [...m, { role: "assistant", content: reply }]);
     } catch (err) {
       console.error(err);
-      setMessages((m) => [
+      setMsgs((m) => [
         ...m,
         {
           role: "assistant",
           content:
-            "Sorry, I ran into a problem talking to OpenAI. Please try again.",
+            "Sorry, I hit an internal error. Please try again in a minute.",
         },
       ]);
     } finally {
-      setIsLoading(false);
-      setInputMessage("");
-      setUploadedFiles([]);
+      setInput("");
+      setImages([]);
+      setBusy(false);
     }
   };
 
-  /* allow ⌨️ Enter to send */
-  const handleKeyPress = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  /* Enter to send */
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      send();
     }
   };
 
-  /*───────────────────────────────────────────────────────────────
-    UI
-  ────────────────────────────────────────────────────────────────*/
+  /* ---------- UI ---------- */
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 px-4 py-10 md:px-10 lg:px-20 flex flex-col gap-16">
-      {/* ——— HERO ——— */}
-      <header className="max-w-5xl mx-auto text-center space-y-6">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-6 md:p-12 flex flex-col gap-10">
+      <header className="text-center space-y-4 max-w-3xl mx-auto">
         <h1 className="text-4xl md:text-5xl font-extrabold bg-gradient-to-r from-blue-600 to-indigo-600 text-transparent bg-clip-text">
-          FIP Diagnostic&nbsp;Assistant
+          FIP Diagnostic Assistant
         </h1>
-        <p className="text-gray-700 md:text-lg">
-          Upload lab results, imaging or describe symptoms. Powered by OpenAI +
-          FIP Warriors® India x FSGI protocols.
+        <p className="text-gray-700">
+          Upload lab images or describe symptoms—powered by GPT-4o vision +
+          FIP Warriors® India protocols
         </p>
       </header>
 
-      {/* ——— INFO CARDS ——— */}
-      <section className="max-w-5xl mx-auto grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-        {/* Labs */}
-        <div className="bg-white/80 backdrop-blur rounded-2xl shadow-lg p-6 space-y-4">
-          <FileText className="w-8 h-8 text-blue-600" />
-          <h3 className="text-xl font-semibold">Lab Work</h3>
-          <p className="text-gray-600 text-sm leading-relaxed">
-            CBC, serum chemistry, A:G ratio, protein electrophoresis—upload PDFs
-            or photos of results.
-          </p>
-        </div>
-        {/* Imaging */}
-        <div className="bg-white/80 backdrop-blur rounded-2xl shadow-lg p-6 space-y-4">
-          <Image className="w-8 h-8 text-purple-600" />
-          <h3 className="text-xl font-semibold">Imaging</h3>
-          <p className="text-gray-600 text-sm leading-relaxed">
-            X-rays, ultrasound, CT. Detect effusions, granulomas and ocular
-            changes relevant to FIP.
-          </p>
-        </div>
-        {/* Symptoms */}
-        <div className="bg-white/80 backdrop-blur rounded-2xl shadow-lg p-6 space-y-4">
-          <Heart className="w-8 h-8 text-pink-600" />
-          <h3 className="text-xl font-semibold">Clinical Signs</h3>
-          <p className="text-gray-600 text-sm leading-relaxed">
-            Fever, weight loss, neuro signs, ocular lesions—describe everything
-            you observe.
-          </p>
-        </div>
-      </section>
-
-      {/* ——— DISCLAIMER ——— */}
-      <section className="max-w-4xl mx-auto bg-amber-50 border-l-4 border-amber-400 p-5 rounded-xl flex gap-4">
-        <AlertTriangle className="w-6 h-6 text-amber-500 mt-1" />
-        <p className="text-sm text-amber-800 leading-relaxed">
-          <strong>Disclaimer:</strong> This tool is for informational purposes
-          only and does not replace a licensed veterinarian’s clinical
-          judgement. Always consult your vet before starting treatment.
-        </p>
-      </section>
-
-      {/* ——— CHAT PANEL ——— */}
-      <section className="max-w-5xl mx-auto flex-1 bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col">
-        {/* message history */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-gray-50">
-          {messages.map((m, i) => (
+      <section className="max-w-3xl mx-auto bg-white rounded-2xl shadow-xl flex flex-col overflow-hidden">
+        {/* history */}
+        <div className="p-6 space-y-6 overflow-y-auto flex-1 bg-gray-50">
+          {msgs.map((m, i) => (
             <div
               key={i}
               className={`flex ${
@@ -225,7 +155,7 @@ export default function FipDiagnosticChatbot() {
               }`}
             >
               <div
-                className={`max-w-2xl rounded-2xl p-4 md:p-5 whitespace-pre-wrap leading-relaxed ${
+                className={`max-w-[80%] rounded-2xl p-4 whitespace-pre-wrap leading-relaxed ${
                   m.role === "user"
                     ? "bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-lg"
                     : "bg-white border border-gray-200 shadow-sm"
@@ -235,60 +165,16 @@ export default function FipDiagnosticChatbot() {
               </div>
             </div>
           ))}
-          {isLoading && (
-            <p className="text-sm text-gray-500">🤖 Bot is typing…</p>
-          )}
-          {/* anchor for auto-scroll */}
+          {busy && <p className="text-sm text-gray-500">🤖 Bot is typing…</p>}
           <div ref={bottomRef} />
         </div>
 
         {/* composer */}
-        <div className="border-t bg-white p-4 md:p-6">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,image/*"
-            multiple
-            className="hidden"
-            onChange={handleFileUpload}
-          />
-
-          <div className="flex gap-3">
-            {/* Upload */}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl"
-            >
-              <Upload className="w-4 h-4" />
-              <span className="hidden sm:inline">Upload</span>
-            </button>
-
-            {/* textarea */}
-            <textarea
-              rows={3}
-              className="flex-1 p-3 border border-gray-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300 text-sm"
-              placeholder="Describe symptoms, ask a question… (Shift+Enter for new line)"
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={handleKeyPress}
-            />
-
-            {/* Send */}
-            <button
-              onClick={handleSendMessage}
-              disabled={
-                isLoading || (!inputMessage.trim() && uploadedFiles.length === 0)
-              }
-              className="px-4 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl disabled:opacity-50"
-            >
-              <Send className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* show filenames preview */}
-          {uploadedFiles.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {uploadedFiles.map((f, idx) => (
+        <div className="border-t bg-white p-4 space-y-3">
+          {/* selected file chips */}
+          {images.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {images.map((f, idx) => (
                 <span
                   key={idx}
                   className="text-xs bg-gray-200 px-2 py-1 rounded-md"
@@ -298,11 +184,54 @@ export default function FipDiagnosticChatbot() {
               ))}
             </div>
           )}
+
+          {/* hidden picker */}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg"
+            multiple
+            className="hidden"
+            onChange={onFiles}
+          />
+
+          <div className="flex gap-3">
+            {/* single Upload button */}
+            <label className="flex items-center gap-2 px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl cursor-pointer">
+              <UploadIcon className="w-4 h-4" />
+              <span>Upload image(s)</span>
+              <input
+                type="file"
+                accept="image/png,image/jpeg"
+                multiple
+                className="hidden"
+                onChange={onFiles}
+              />
+            </label>
+
+            {/* textarea */}
+            <textarea
+              rows={3}
+              className="flex-1 p-3 border border-gray-300 rounded-xl resize-none text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              placeholder="Describe symptoms, age, lab values…"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKey}
+            />
+
+            {/* send */}
+            <button
+              onClick={send}
+              disabled={busy || (!input.trim() && images.length === 0)}
+              className="px-4 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl disabled:opacity-50"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </div>
         </div>
       </section>
 
-      {/* ——— FOOTNOTE ——— */}
-      <footer className="max-w-5xl mx-auto text-center text-xs text-gray-500 flex items-center justify-center gap-1">
+      <footer className="max-w-3xl mx-auto text-xs text-gray-500 flex items-center gap-1">
         <Info className="w-3 h-3" />
         Built for the FIP Warriors® community • Powered by OpenAI
       </footer>
